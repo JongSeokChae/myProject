@@ -1,0 +1,86 @@
+trigger createSimilarCasesTrigger on Case (after insert, after update) {
+    
+    if ((Trigger.isInsert && Trigger.isAfter) || (Trigger.isUpdate && Trigger.isAfter)){
+        if (controlVars.isFirstGet() == true) {
+            controlVars.isFirstSet();
+            controlVars.numRemainSet(Trigger.New.size());
+        }
+        if (controlVars.numRemainGet() > 0) {
+            // Create a pointer to a new case just inserted in insert trigger
+            Case newCase = Trigger.New[Trigger.New.size() - controlVars.numRemainGet()]; // Trigger.New is a list of new case records that caused the trigger to fire
+            controlVars.numRemainDec();
+            
+            // Fields of a new case to be used to pull out old cases in database similar to a new case
+            String newCaseProductGroup = newCase.Product_Group__c; 					
+            String newCaseProductGroupSubtype = newCase.Product_Group_Sub_Type__c; 
+            String newCaseDescription = newCase.Description;
+            String newCaseSubject = newCase.Subject;
+            
+            // Initial filtering with SQL query
+            List<Case> similarCasesList;
+            if (newCaseProductGroup != null && newCaseProductGroup.equals('Automation Products')) { 
+                if (newCaseProductGroupSubtype != null && newCaseProductGroupSubtype.equals('TripSaver Dropout Recloser')) {
+                    similarCasesList = [SELECT CaseNumber, Subject, Description, ID, TestField__c FROM Case WHERE 
+                                        Product_Group__c = :newCaseProductGroup AND
+                                        Product_Group_Sub_Type__c = :newCaseProductGroupSubtype AND 
+                                        Status = 'closed'];
+                    controlVars.isFieldMatchedSet();
+                } 
+            } 
+            // the body of the trigger would be executed only when the product_group_subtype of the case is 'TripSaver Dropout Recloser'
+            if (controlVars.isFieldMatchedGet() == true) { 
+                Set<Case> similarCases = new Set<Case>();
+                similarCases.addAll(similarCasesList);
+                if (similarCases != null && !similarCases.isEmpty()) {
+                    system.debug(logginglevel.ERROR,'collected ' + similarCases.size() + ' similar cases after the initial filter');
+                }
+                
+                // Fill out the related cases of the new case in salesforce using subject and descripton fields
+                if (similarCases != null && !similarCases.isEmpty()) {    
+                    // 1. Using simple keyword extraction, extract keywords from a new case's description
+                    Set<String> keyWordsInDescription = StringHandler.parseAndRemove(newCaseDescription);	
+                    
+                    
+                    // 2. Intermediate filtering using subject field 
+                    // (if none of keywords in the subject of the new case 
+                    //  appears in an old case, remove the old case from similarCases collection)
+                    Set<String> keyWordsInSubject = StringHandler.parseAndRemove(newCaseSubject);
+                    Boolean shouldInclude;
+                    for (case c: similarcases) {
+                        if (c.subject == null) continue;
+                        shouldInclude = false;
+                        for (String word: StringHandler.parseAndRemove(c.Subject)) {
+                            if (keyWordsInSubject.contains(word)) { 
+                                shouldInclude = true;
+                                break;
+                            }
+                        }
+                        if (shouldInclude == false) {
+                            similarCases.remove(c);
+                        }
+                    }
+                    if (similarCases != null && !similarCases.isEmpty()) {
+                        system.debug(logginglevel.ERROR,'collected ' + similarCases.size() + ' similar cases after the second filter');
+                    }
+                    
+                    //3. Final filtering using tf_idf algorithm
+                    List<Case> similarCasesL = tf_idf.collectOldCases(keyWordsInDescription, similarCases);
+                    if (similarCases != null && !similarCases.isEmpty()) {
+                        system.debug(logginglevel.ERROR,'collected ' + similarCasesL.size() + ' similar cases after the last filter'); 
+                    }
+                    
+                    //4. Create reference to those old cases in the new case's related cases field      
+                    if (similarCasesL != null && !similarCases.isEmpty()) {
+                        Case newCaseCopy = Trigger.New[0];
+                        Case updateCase = [select casenumber from case where casenumber = :newCaseCopy.casenumber];
+                        updateCase.similarCases__c = '';
+                        for (Case oldCase: similarCasesL) {
+                            updateCase.similarCases__c += oldCase.TestField__c + '\n';
+                        }
+                        update updateCase;
+                    }
+                }
+            }
+        }
+    }   
+}
